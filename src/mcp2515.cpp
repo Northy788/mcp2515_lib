@@ -1,0 +1,324 @@
+/**
+ * @file mcp2515.cpp
+ * @author Mr. Thaithat Kantha
+ * @brief Source file for MCP2515 CAN controller library, implementing core driver functions.
+ * @version 1.0.0
+ * @date 2026-02-23
+ * @copyright Copyright (c) 2026 MongMongTech Co., Ltd. All rights reserved.
+ **/
+
+#include "mcp2515.hpp"
+#include "mcp2515_regs.hpp"
+
+namespace { /* Anonymous namespace for internal linkage and encapsulation of helper types and constants. */
+
+struct BitrateConfig_t {
+    uint8_t cnf1;
+    uint8_t cnf2;
+    uint8_t cnf3;
+};
+
+static const BitrateConfig_t k_bitrateTable[] = {
+#define MCP2515_CONF(freq, speed, c1, c2, c3) { c1, c2, c3 }, // (A)
+    MCP2515_BITRATE_LIST // (B)
+#undef MCP2515_CONF
+};
+}
+
+/**
+ * @brief Send Reset instruction to MCP2515.
+ * SPI mode 0 (0,0), max 10MHz, CS low during transfer, then delay for internal reset to complete.
+ * @return true if reset command was successfully sent, false otherwise.
+ */
+bool Mcp2515_Driver_t::mcp2515_reset(void) {
+    bool isSuccess = false;
+    const uint8_t instruction = Mcp2515_Regs::INST__RESET;
+
+    /* Reset sequence: CS low -> Send 0xC0 -> CS high -> Delay */
+    if (nullptr != p_hal->spiTransfer) {
+        p_hal->setChipSelect(true); /* Active low, but usually HAL handles logic */
+        isSuccess = p_hal->spiTransfer(&instruction, nullptr, 1);
+        p_hal->setChipSelect(false);
+        
+        /* Wait for internal reset to complete */
+        p_hal->delayMs(10);
+    }
+
+    return isSuccess;
+}
+
+/**
+ * @brief Write a single byte to a specific register.
+ * @param address The register address to write to.
+ * @param data The value to be written.
+ * @return true if the operation was successful.
+ */
+bool Mcp2515_Driver_t::mcp2515_writeRegister(const uint8_t address, const uint8_t data)
+{
+    bool isSuccess = false;
+
+    /* MCP2515 Write Sequence: [Instruction (0x02)] -> [Address] -> [Data] */
+    uint8_t txBuffer[3] = {
+        Mcp2515_Regs::INST__WRITE,
+        address,
+        data
+    };
+
+    /* Verify HAL and SPI function pointer availability */
+    if (nullptr != p_hal->spiTransfer)
+    {
+        /* 1. Pull CS Low to start SPI transaction */
+        p_hal->setChipSelect(true);
+
+        /* 2. Transfer 3 bytes (Instruction, Address, Data) */
+        /* pRxBuffer is set to nullptr as we don't need to read back during Write */
+        isSuccess = p_hal->spiTransfer(txBuffer, nullptr, 3);
+
+        /* 3. Pull CS High to terminate SPI transaction */
+        p_hal->setChipSelect(false);
+    }
+
+    return isSuccess; /* Rule 12.6: Single return point */
+}
+
+/**
+ * @brief Read a single byte from a specific register.
+ * @param address The register address to read from.
+ * @return The 8-bit value read from the register. 
+ * Note: In a professional driver, you might return a status code 
+ * and use a pointer for the data, but for simplicity here we return the value.
+ */
+uint8_t Mcp2515_Driver_t::mcp2515_readRegister(const uint8_t address)
+{
+    uint8_t readValue = 0x00;
+    
+    /* Prepare 3-byte buffers for the full-duplex transfer 
+     * [0] Instruction, [1] Address, [2] Dummy Byte (to clock out the data)
+     */
+    uint8_t txData[3] = {
+        Mcp2515_Regs::INST__READ,
+        address,
+        0x00 /* Dummy byte */
+    };
+    
+    uint8_t rxData[3] = {0};
+
+    /* Use our helper to handle CS and safety checks */
+    if (executeSpiCommand(txData, rxData, 3))
+    {
+        /* The data from MCP2515 shifts in while we shift out the dummy byte.
+         * So the result is in the 3rd byte of our receive buffer.
+         */
+        readValue = rxData[2];
+    }
+    else
+    {
+        /* Rule: In professional systems, log an error here if SPI fails */
+    }
+
+    return readValue;
+}
+
+/**
+ * @brief Modify specific bits in a register using a mask.
+ * @note This instruction is only available for certain registers (refer to datasheet).
+ * @param address The register address to modify.
+ * @param mask The bit mask (1 = allow change, 0 = keep original).
+ * @param data The new values for the bits enabled in the mask.
+ * @return true if the SPI operation was successful.
+ */
+bool Mcp2515_Driver_t::mcp2515_bitModify(const uint8_t address, const uint8_t mask, const uint8_t data)
+{
+    bool isSuccess = false;
+
+    /* BIT MODIFY Sequence: [0x05] -> [Address] -> [Mask] -> [Data] */
+    uint8_t txData[4] = {
+        Mcp2515_Regs::INST__BIT_MODIFY,
+        address,
+        mask,
+        data
+    };
+
+    /* Use our internal helper to handle safety checks and CS management */
+    isSuccess = executeSpiCommand(txData, nullptr, 4);
+
+    return isSuccess;
+}
+
+/**
+ * @brief Configure the CAN bitrate using pre-defined CNF values.
+ * @note The MCP2515 MUST be in Configuration Mode to execute this.
+ * @param speedIndex The index from Mcp2515_Speed_e enum.
+ * @return true if all registers were written successfully.
+ */
+bool Mcp2515_Driver_t::mcp2515_setBitrate(const Mcp2515_Regs::Mcp2515_Speed_e speedIndex)
+{
+    bool isSuccess = false;
+
+    /* 1. Range Check: Defensive Programming */
+    if (speedIndex < Mcp2515_Regs::Mcp2515_Speed_Max)
+    {
+        const BitrateConfig_t* pCfg = &k_bitrateTable[speedIndex];
+
+        /* 2. Execute Writes 
+         * Note: We use the helper 'mcp2515_writeRegister' which already 
+         * handles CS and HAL safety checks.
+         */
+        bool w1 = mcp2515_writeRegister(Mcp2515_Regs::CNF1, pCfg->cnf1);
+        bool w2 = mcp2515_writeRegister(Mcp2515_Regs::CNF2, pCfg->cnf2);
+        bool w3 = mcp2515_writeRegister(Mcp2515_Regs::CNF3, pCfg->cnf3);
+
+        /* 3. Logical AND for final success status (Single Exit Point) */
+        if (w1 && w2 && w3)
+        {
+            uint8_t v1 = mcp2515_readRegister(Mcp2515_Regs::CNF1);
+            uint8_t v2 = mcp2515_readRegister(Mcp2515_Regs::CNF2);
+            uint8_t v3 = mcp2515_readRegister(Mcp2515_Regs::CNF3);
+
+            /* เปรียบเทียบค่าที่อ่านได้กับค่าที่ตั้งใจเขียนลงไป */
+            if ((v1 == pCfg->cnf1) && (v2 == pCfg->cnf2) && (v3 == pCfg->cnf3))
+            {
+                isSuccess = true;
+            }
+            else
+            {
+                /* Log Error: Bitrate Verification Failed! 
+                 * อาจเกิดจาก Chip ไม่ได้อยู่ใน Configuration Mode
+                 */
+            }
+        }
+    }
+
+    return isSuccess;
+}
+
+/**
+ * @brief Change the operation mode of the MCP2515.
+ * @param targetMode The desired mode (e.g., Normal, Sleep, Config).
+ * @return true if the mode was successfully changed within the timeout period.
+ */
+bool Mcp2515_Driver_t::mcp2515_setMode(const Mcp2515_Regs::Mcp2515_Mode_e targetMode)
+{
+    bool isSuccess = false;
+    uint32_t timeoutCounter = 0;
+    const uint32_t MAX_POLLING_RETRY = 2000; /* Adjust based on SPI speed/System clock */
+
+    /* 1. Request Mode Change using Bit Modify
+     * Address: CANCTRL (0x0F)
+     * Mask: 0xE0 (1110 0000) - We only want to touch the top 3 bits (REQOP)
+     * Data: targetMode (should be shifted/defined to occupy bits 7,6,5)
+     */
+    mcp2515_bitModify(Mcp2515_Regs::CANCTRL, 0xE0, static_cast<uint8_t>(targetMode));
+
+    /* 2. Verification via Polling
+     * We must check the OPMOD bits (7,6,5) in CANSTAT to confirm the change.
+     */
+    while (timeoutCounter < MAX_POLLING_RETRY)
+    {
+        uint8_t currentStat = mcp2515_readRegister(Mcp2515_Regs::CANSTAT);
+        
+        /* Mask bits 7,6,5 to isolate OPMOD */
+        if ((currentStat & 0xE0) == static_cast<uint8_t>(targetMode))
+        {
+            isSuccess = true;
+            break; /* Exit loop early if successful */
+        }
+        
+        timeoutCounter++;
+    }
+
+    return isSuccess;
+}
+
+/**
+ * @brief Read a CAN message from the specified hardware RX buffer.
+ * @param bufferId 0 for RXB0, 1 for RXB1.
+ * @param pMsg Pointer to CanMessage_t to store the result.
+ * @return true if the message was read successfully.
+ */
+bool Mcp2515_Driver_t::mcp2515_readMessage(const uint8_t bufferId, CanMessage_t* pMsg) {
+    bool isSuccess = false;
+    
+    if (nullptr == pMsg) return false;
+
+    /* 1. Determine the Optimized Instruction (Starting at SIDH) */
+    uint8_t instruction = (bufferId == 0) ? Mcp2515_Regs::INST__READ_RX0_SIDH : Mcp2515_Regs::INST__READ_RX1_SIDH;
+
+    /* 2. Prepare Buffers
+     * [0] Instruction
+     * [1..4] ID Registers
+     * [5] DLC
+     * [6..13] Data Bytes
+     * Total = 1 + 13 = 14 bytes
+     */
+    uint8_t txData[14] = {instruction}; /* Rest are implicitly 0 (dummy) */
+    uint8_t rxData[14] = {0};
+
+    /* 3. Execute Sequential SPI Transfer */
+    if (executeSpiCommand(txData, rxData, 14)) {
+        /* 4. Parse the ID Registers (rxData[1..4]) */
+        /* rxData[1]: SIDH, rxData[2]: SIDL, rxData[3]: EID8, rxData[4]: EID0 */
+        
+        pMsg->id = (static_cast<uint32_t>(rxData[1]) << 3) | (rxData[2] >> 5);
+        
+        /* Check for Extended ID bit in SIDL (bit 3) */
+        if ((rxData[2] & 0x08) != 0) {
+            pMsg->isExtended = true;
+            pMsg->id = (pMsg->id << 2) | (rxData[2] & 0x03);
+            pMsg->id = (pMsg->id << 8) | rxData[3];
+            pMsg->id = (pMsg->id << 8) | rxData[4];
+        } else {
+            pMsg->isExtended = false;
+        }
+
+        /* 5. Parse DLC (rxData[5]) - Bits 3-0 */
+        pMsg->dlc = rxData[5] & 0x0F;
+        if (pMsg->dlc > 8) pMsg->dlc = 8;
+
+        /* 6. Copy Data Payload (rxData[6..13]) */
+        for (uint8_t i = 0; i < pMsg->dlc; i++) {
+            pMsg->data[i] = rxData[6 + i];
+        }
+
+        isSuccess = true;
+    }
+
+    return isSuccess;
+}
+
+/**
+ * @brief Clear a specific interrupt flag in the CANINTF register.
+ * @param interrupt The specific interrupt flag to clear.
+ * @return true if the SPI command was successful.
+ */
+bool Mcp2515_Driver_t::mcp2515_clearInterrupt(const Mcp2515_Regs::Mcp2515_Interrupt_e interrupt)
+{
+    /* * bitModify(Address, Mask, Data)
+     * Address: CANINTF (0x2C)
+     * Mask: The specific bit we want to change (e.g., 0x01 for RX0IF)
+     * Data: 0x00 (Because writing 0 clears the flag in MCP2515)
+     */
+    return mcp2515_bitModify(Mcp2515_Regs::CANINTF, 
+                             static_cast<uint8_t>(interrupt), 
+                             0x00);
+}
+
+
+/**
+ * @brief Internal helper to encapsulate the CS logic and safety checks.
+ * Rule 12.6: Single Exit Point.
+ */
+bool Mcp2515_Driver_t::executeSpiCommand(const uint8_t* pTxData, uint8_t* pRxData, uint16_t len) {
+    bool isSuccess = false;
+
+    /* Check if HAL and transfer function are valid */
+    if ((nullptr != p_hal) && (nullptr != p_hal->spiTransfer)) {
+        p_hal->setChipSelect(true);  /* 1. CS Active */
+        
+        isSuccess = p_hal->spiTransfer(pTxData, pRxData, len); /* 2. Transfer */
+        
+        p_hal->setChipSelect(false); /* 3. CS Inactive */
+    }
+
+    return isSuccess;
+}

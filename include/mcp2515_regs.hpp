@@ -44,11 +44,11 @@ namespace Mcp2515_Regs
      * @brief MCP2515 Operation Modes (REQOP bits in CANCTRL / OPMOD bits in CANSTAT)
      */
     typedef enum {
-      Mcp2515_Mode_Normal     = 0x00,
-      Mcp2515_Mode_Sleep      = 0x20,
-      Mcp2515_Mode_Loopback   = 0x40,
-      Mcp2515_Mode_ListenOnly = 0x60,
-      Mcp2515_Mode_Config     = 0x80
+      Mcp2515_Mode_Normal     = (0x00), /* 0000 0000 */
+      Mcp2515_Mode_Sleep      = (0x20), /* 0010 0000 */
+      Mcp2515_Mode_Loopback   = (0x40), /* 0100 0000 */
+      Mcp2515_Mode_ListenOnly = (0x60), /* 0110 0000 */
+      Mcp2515_Mode_Config     = (0x80)  /* 1000 0000 */
     } Mcp2515_Mode_e;
 
     /**
@@ -64,6 +64,20 @@ namespace Mcp2515_Regs
       Mcp2515_InterruptCode_Rxb0   = 0x06,
       Mcp2515_InterruptCode_Rxb1   = 0x07
     } Mcp2515_InterruptCode_e;  
+
+    /**
+     * @brief MCP2515 Interrupt Flag Bits in CANINTF register.
+     */
+    typedef enum {
+        Mcp2515_Int_Rx0      = 0x01, /**< Receive Buffer 0 Full */
+        Mcp2515_Int_Rx1      = 0x02, /**< Receive Buffer 1 Full */
+        Mcp2515_Int_Tx0      = 0x04, /**< Transmit Buffer 0 Empty */
+        Mcp2515_Int_Tx1      = 0x08, /**< Transmit Buffer 1 Empty */
+        Mcp2515_Int_Tx2      = 0x10, /**< Transmit Buffer 2 Empty */
+        Mcp2515_Int_Error    = 0x20, /**< Error Interrupt */
+        Mcp2515_Int_Wakeup   = 0x40, /**< Wake-up Interrupt */
+        Mcp2515_Int_Message  = 0x80  /**< Message Error Interrupt */
+    } Mcp2515_Interrupt_e;
 
     /**
     * @name Acceptance Filters (RXFn) - Rule 15.1
