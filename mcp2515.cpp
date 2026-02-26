@@ -299,14 +299,27 @@ bool Mcp2515_Driver_t::mcp2515_sendMessage(const uint8_t bufferId, const CanMess
     txData[0] = instruction;
 
     // จัดการ ID (ตัวอย่างสำหรับ Standard ID)
-    txData[1] = static_cast<uint8_t>(pMsg->id >> 3);       // SIDH
-    txData[2] = static_cast<uint8_t>(pMsg->id << 5);       // SIDL
+    /**< CAN ID (Standard or Extended) [000s ssss ssss ss][xx xxxx xxxx xxxx xxxx]*/
+    
     
     if (pMsg->isExtended) {
-        txData[2] |= 0x08; // Set EXIDE bit
-        // เพิ่มเติมการจัดการ EID ถ้าใช้งาน Extended ID...
-        txData[3] = static_cast<uint8_t>(pMsg->id >> 16); // EID8
-        txData[4] = static_cast<uint8_t>(pMsg->id >> 8);  // EID0
+        // for Extended ID, we need to split the 29-bit ID across SIDH, SIDL, EID8, and EID0
+        // pMsg->id bit 28-21 -> SIDH[7:0]
+        txData[1] = static_cast<uint8_t>(pMsg->id >> 21); 
+        
+        // pMsg->id bit 20-18 -> SIDL[7:5], bit 17-16 -> SIDL[1:0], bit 20 (EXIDE) -> SIDL[3]
+        txData[2] = static_cast<uint8_t>(((pMsg->id >> 13) & 0xE0) | 0x08 | ((pMsg->id >> 16) & 0x03));
+        
+        // pMsg->id bit 15-8 -> EID8
+        txData[3] = static_cast<uint8_t>(pMsg->id >> 8);
+        
+        // pMsg->id bit 7-0 -> EID0
+        txData[4] = static_cast<uint8_t>(pMsg->id);
+    } else {
+        txData[1] = static_cast<uint8_t>(pMsg->id >> 3);      // SIDH SID10-SID3
+        txData[2] = static_cast<uint8_t>(pMsg->id << 5);       // SIDL SID2-SID0 + EXIDE
+        txData[3] = 0; // EID8-EID15
+        txData[4] = 0; // EID0-EID7
     }
 
     // จัดการ DLC

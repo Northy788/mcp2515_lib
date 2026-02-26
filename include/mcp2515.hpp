@@ -21,7 +21,7 @@
  * @brief Structure to hold CAN message data.
  */
 typedef struct {
-    uint32_t id;          /**< CAN ID (Standard or Extended) */
+    uint32_t id;          /**< CAN ID (Standard or Extended) [000s ssss ssss ss][xx xxxx xxxx xxxx xxxx]*/
     uint8_t  dlc;         /**< Data Length Code (0-8) */
     uint8_t  data[8];     /**< Data payload */
     bool     isExtended;  /**< True if Extended ID, False if Standard */
