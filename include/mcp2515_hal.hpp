@@ -31,6 +31,10 @@ typedef struct {
 
     /** @brief Millisecond delay function. */
     void (*delayMs)(uint32_t ms);
+
+    /* Optional: for synchronization in multi-threaded environments */
+    void (*lockBus)(void);
+    void (*unlockBus)(void);
 } Mcp2515_Hal_t;
 
 #endif /* MCP2515_HAL_HPP_ */

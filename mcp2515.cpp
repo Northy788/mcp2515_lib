@@ -38,9 +38,7 @@ bool Mcp2515_Driver_t::mcp2515_reset(void) {
 
     /* Reset sequence: CS low -> Send 0xC0 -> CS high -> Delay */
     if (nullptr != p_hal->spiTransfer) {
-        p_hal->setChipSelect(true); /* Active low, but usually HAL handles logic */
-        isSuccess = p_hal->spiTransfer(&instruction, nullptr, 1);
-        p_hal->setChipSelect(false);
+        isSuccess = executeSpiCommand(&instruction, nullptr, 1); /* Use helper for consistency and safety checks */
         
         /* Wait for internal reset to complete */
         p_hal->delayMs(10);
@@ -296,7 +294,7 @@ bool Mcp2515_Driver_t::mcp2515_sendMessage(const uint8_t bufferId, const CanMess
     else if (bufferId == 1) instruction = 0x42; // LOAD TXB1 SIDH
     else                    instruction = 0x44; // LOAD TXB2 SIDH
 
-    /* 2. เตรียมข้อมูล 13 ไบต์ (ID 4 + DLC 1 + Data 8) */
+    /* 2. prepare data 13 bytes (ID 4 + DLC 1 + Data 8) */
     uint8_t txData[14] = {0};
     txData[0] = instruction;
 
@@ -307,6 +305,8 @@ bool Mcp2515_Driver_t::mcp2515_sendMessage(const uint8_t bufferId, const CanMess
     if (pMsg->isExtended) {
         txData[2] |= 0x08; // Set EXIDE bit
         // เพิ่มเติมการจัดการ EID ถ้าใช้งาน Extended ID...
+        txData[3] = static_cast<uint8_t>(pMsg->id >> 16); // EID8
+        txData[4] = static_cast<uint8_t>(pMsg->id >> 8);  // EID0
     }
 
     // จัดการ DLC
@@ -345,6 +345,109 @@ bool Mcp2515_Driver_t::mcp2515_clearInterrupt(const Mcp2515_Regs::Mcp2515_Interr
                              0x00);
 }
 
+/** @brief อ่านค่า Error Flag ทั้งหมดจากรีจิสเตอร์ EFLG (0x2D) */
+uint8_t Mcp2515_Driver_t::mcp2515_getErrorFlags(void) {
+    return mcp2515_readRegister(Mcp2515_Regs::EFLG);
+}
+
+/** @brief อ่านค่า Interrupt Flag ทั้งหมดจากรีจิสเตอร์ CANINTF (0x2C) */
+uint8_t Mcp2515_Driver_t::mcp2515_getInterrupts(void) {
+    return mcp2515_readRegister(Mcp2515_Regs::CANINTF);
+}
+
+/** @brief ล้างบิต Overflow ทั้งบัฟเฟอร์ 0 และ 1 (0xC0) ใน EFLG */
+void Mcp2515_Driver_t::mcp2515_clearRXnOVR(void) {
+    /* 0xC0 = 1100 0000 (RX1OVR และ RX0OVR) */
+    mcp2515_bitModify(Mcp2515_Regs::EFLG, 0xC0, 0x00);
+}
+
+/** @brief ล้าง Error Interrupt Flag ใน CANINTF */
+void Mcp2515_Driver_t::mcp2515_clearERRIF(void) {
+    mcp2515_clearInterrupt(Mcp2515_Regs::Mcp2515_Int_Error);
+}
+
+/** @brief ล้าง Message Error Interrupt Flag ใน CANINTF */
+void Mcp2515_Driver_t::mcp2515_clearMERR(void) {
+    mcp2515_clearInterrupt(Mcp2515_Regs::Mcp2515_Int_Message);
+}
+
+
+/** @brief ตั้งค่า Acceptance Filter (RXFn) โดยระบุที่อยู่เริ่มต้น (SIDH) */
+bool Mcp2515_Driver_t::mcp2515_setFilter(const uint8_t filterAddr, const bool isExtended, const uint32_t id) {
+    uint8_t txData[6] = { Mcp2515_Regs::INST__WRITE, filterAddr };
+    
+    if (isExtended) {
+        txData[2] = static_cast<uint8_t>(id >> 21);
+        txData[3] = static_cast<uint8_t>(((id >> 13) & 0xE0) | 0x08 | ((id >> 16) & 0x03));
+        txData[4] = static_cast<uint8_t>(id >> 8);
+        txData[5] = static_cast<uint8_t>(id);
+    } else {
+        txData[2] = static_cast<uint8_t>(id >> 3);
+        txData[3] = static_cast<uint8_t>(id << 5);
+        txData[4] = 0;
+        txData[5] = 0;
+    }
+    return executeSpiCommand(txData, nullptr, 6);
+}
+
+/** @brief ตั้งค่า Acceptance Mask (RXMn) โดยระบุที่อยู่เริ่มต้น (SIDH) */
+bool Mcp2515_Driver_t::mcp2515_setMask(const uint8_t maskAddr, const bool isExtended, const uint32_t maskValue) {
+    /* ใช้ Logic เดียวกับ Filter แต่บิต EXIDE (0x08) ในไบต์ที่ 2 มักใช้ต่างกันเล็กน้อย */
+    return mcp2515_setFilter(maskAddr, isExtended, maskValue);
+}
+
+/** @brief ตรวจสอบสถานะ Bus-Off (TXBO บิต 5 ใน EFLG) */
+bool Mcp2515_Driver_t::mcp2515_isBusOff(void) {
+    return (mcp2515_readRegister(Mcp2515_Regs::EFLG) & 0x20) != 0;
+}
+
+/** @brief อ่านค่าตัวนับข้อผิดพลาดฝั่งรับ (REC) */
+uint8_t Mcp2515_Driver_t::mcp2515_getREC(void) {
+    return mcp2515_readRegister(Mcp2515_Regs::REC);
+}
+
+/** @brief อ่านค่าตัวนับข้อผิดพลาดฝั่งส่ง (TEC) */
+uint8_t Mcp2515_Driver_t::mcp2515_getTEC(void) {
+    return mcp2515_readRegister(Mcp2515_Regs::TEC);
+}
+
+/** @brief อ่านสถานะด่วนโดยใช้คำสั่ง 0xA0 (เร็วกว่าการอ่านรีจิสเตอร์ปกติ) */
+uint8_t Mcp2515_Driver_t::mcp2515_getStatus(void) {
+    uint8_t tx[2] = { Mcp2515_Regs::INST__READ_STATUS, 0x00 };
+    uint8_t rx[2] = { 0 };
+    executeSpiCommand(tx, rx, 2);
+    return rx[1]; /* ข้อมูลสถานะจะถูกส่งกลับมาในไบต์ที่ 2 */
+}
+
+/** @brief เช็คว่าบัฟเฟอร์การส่งที่ระบุ (0, 1, 2) กำลังรอคิวส่งอยู่หรือไม่ (TXREQ) */
+bool Mcp2515_Driver_t::mcp2515_isTxPending(const uint8_t bufferId) {
+    uint8_t addr = (bufferId == 0) ? Mcp2515_Regs::TXB0__CTRL :
+                   (bufferId == 1) ? Mcp2515_Regs::TXB1__CTRL : Mcp2515_Regs::TXB2__CTRL;
+    /* เช็คบิตที่ 3 (TXREQ) */
+    return (mcp2515_readRegister(addr) & 0x08) != 0;
+}
+
+/**
+ * @brief อ่านรีจิสเตอร์สำคัญ 12 ตัวเพื่อใช้ในการ Debug
+ * @param pDestBuffer ตัวชี้ไปยังอาเรย์ขนาดอย่างน้อย 12 ไบต์
+ */
+void Mcp2515_Driver_t::mcp2515_getTelemetry(uint8_t* pDestBuffer) {
+    if (nullptr == pDestBuffer) return;
+
+    // ลิสต์รีจิสเตอร์ตามลำดับที่ออกแบบไว้
+    const uint8_t regList[] = {
+        Mcp2515_Regs::CANSTAT,  Mcp2515_Regs::CANCTRL,  // 0x0E, 0x0F
+        Mcp2515_Regs::TEC,      Mcp2515_Regs::REC,      // 0x1C, 0x1D
+        Mcp2515_Regs::CANINTE,  Mcp2515_Regs::CANINTF,  // 0x2B, 0x2C
+        Mcp2515_Regs::EFLG,                             // 0x2D
+        Mcp2515_Regs::TXB0__CTRL, Mcp2515_Regs::TXB1__CTRL, Mcp2515_Regs::TXB2__CTRL, // 0x30, 0x40, 0x50
+        Mcp2515_Regs::RXB0__CTRL, Mcp2515_Regs::RXB1__CTRL  // 0x60, 0x70
+    };
+
+    for (uint8_t i = 0; i < 12; i++) {
+        pDestBuffer[i] = mcp2515_readRegister(regList[i]);
+    }
+}
 
 /**
  * @brief Internal helper to encapsulate the CS logic and safety checks.
@@ -353,14 +456,15 @@ bool Mcp2515_Driver_t::mcp2515_clearInterrupt(const Mcp2515_Regs::Mcp2515_Interr
 bool Mcp2515_Driver_t::executeSpiCommand(const uint8_t* pTxData, uint8_t* pRxData, uint16_t len) {
     bool isSuccess = false;
 
-    /* Check if HAL and transfer function are valid */
     if ((nullptr != p_hal) && (nullptr != p_hal->spiTransfer)) {
-        p_hal->setChipSelect(true);  /* 1. CS Active */
-        
-        isSuccess = p_hal->spiTransfer(pTxData, pRxData, len); /* 2. Transfer */
-        
-        p_hal->setChipSelect(false); /* 3. CS Inactive */
-    }
 
+        if (p_hal->lockBus) p_hal->lockBus(); 
+
+        p_hal->setChipSelect(true);  
+        isSuccess = p_hal->spiTransfer(pTxData, pRxData, len); 
+        p_hal->setChipSelect(false); 
+
+        if (p_hal->unlockBus) p_hal->unlockBus();
+    }
     return isSuccess;
 }
