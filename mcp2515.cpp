@@ -7,6 +7,8 @@
  * @copyright Copyright (c) 2026 MongMongTech Co., Ltd. All rights reserved.
  **/
 
+#include <stdint.h>
+
 #include "mcp2515.hpp"
 #include "mcp2515_regs.hpp"
 
@@ -237,8 +239,6 @@ bool Mcp2515_Driver_t::mcp2515_setMode(const Mcp2515_Regs::Mcp2515_Mode_e target
  * @return true if the message was read successfully.
  */
 bool Mcp2515_Driver_t::mcp2515_readMessage(const uint8_t bufferId, CanMessage_t* pMsg) {
-    bool isSuccess = false;
-    
     if (nullptr == pMsg) return false;
 
     /* 1. Determine the Optimized Instruction (Starting at SIDH) */
@@ -251,39 +251,81 @@ bool Mcp2515_Driver_t::mcp2515_readMessage(const uint8_t bufferId, CanMessage_t*
      * [6..13] Data Bytes
      * Total = 1 + 13 = 14 bytes
      */
-    uint8_t txData[14] = {instruction}; /* Rest are implicitly 0 (dummy) */
+    uint8_t txData[14] = {0}; /* Rest are implicitly 0 (dummy) */
     uint8_t rxData[14] = {0};
+	txData[0] = instruction;
+	
+    if (!executeSpiCommand(txData, rxData, 14)) return false;
+    
+    
+    pMsg->id = (static_cast<uint32_t>(rxData[1]) << 3) | (rxData[2] >> 5);
+    
+    pMsg->isExtended = (rxData[2] & 0x08) != 0;
+    if (pMsg->isExtended) {
+        pMsg->id = (pMsg->id << 18) | 
+                   (static_cast<uint32_t>(rxData[2] & 0x03) << 16) |
+                   (static_cast<uint32_t>(rxData[3]) << 8) |
+                   rxData[4];
+    }
+    
+    pMsg->dlc = rxData[5] & 0x0F;
+    pMsg->isRtr = (rxData[5] & 0x40) != 0;
+    
+    for (uint8_t i = 0; i < pMsg->dlc; i++) {
+        pMsg->data[i] = rxData[6 + i];
+    }
+    
+    return true;
+}
 
-    /* 3. Execute Sequential SPI Transfer */
-    if (executeSpiCommand(txData, rxData, 14)) {
-        /* 4. Parse the ID Registers (rxData[1..4]) */
-        /* rxData[1]: SIDH, rxData[2]: SIDL, rxData[3]: EID8, rxData[4]: EID0 */
-        
-        pMsg->id = (static_cast<uint32_t>(rxData[1]) << 3) | (rxData[2] >> 5);
-        
-        /* Check for Extended ID bit in SIDL (bit 3) */
-        if ((rxData[2] & 0x08) != 0) {
-            pMsg->isExtended = true;
-            pMsg->id = (pMsg->id << 2) | (rxData[2] & 0x03);
-            pMsg->id = (pMsg->id << 8) | rxData[3];
-            pMsg->id = (pMsg->id << 8) | rxData[4];
-        } else {
-            pMsg->isExtended = false;
-        }
 
-        /* 5. Parse DLC (rxData[5]) - Bits 3-0 */
-        pMsg->dlc = rxData[5] & 0x0F;
-        if (pMsg->dlc > 8) pMsg->dlc = 8;
+/**
+ * @brief ส่งข้อความ CAN ผ่านบัฟเฟอร์ที่กำหนด
+ * @param bufferId หมายเลขบัฟเฟอร์ (0, 1 หรือ 2)
+ * @param pMsg ตัวชี้ไปยังข้อมูลข้อความที่ต้องการส่ง
+ * @return true ถ้าส่งคำสั่งสำเร็จ
+ */
+bool Mcp2515_Driver_t::mcp2515_sendMessage(const uint8_t bufferId, const CanMessage_t* pMsg) {
+    if (pMsg == nullptr || bufferId > 2) return false;
 
-        /* 6. Copy Data Payload (rxData[6..13]) */
-        for (uint8_t i = 0; i < pMsg->dlc; i++) {
-            pMsg->data[i] = rxData[6 + i];
-        }
+    /* 1. เตรียม Instruction สำหรับ Load TX Buffer 
+     * เริ่มที่ตำแหน่ง ID (SIDH) ของบัฟเฟอร์นั้นๆ
+     */
+    uint8_t instruction = 0;
+    if (bufferId == 0)      instruction = 0x40; // LOAD TXB0 SIDH
+    else if (bufferId == 1) instruction = 0x42; // LOAD TXB1 SIDH
+    else                    instruction = 0x44; // LOAD TXB2 SIDH
 
-        isSuccess = true;
+    /* 2. เตรียมข้อมูล 13 ไบต์ (ID 4 + DLC 1 + Data 8) */
+    uint8_t txData[14] = {0};
+    txData[0] = instruction;
+
+    // จัดการ ID (ตัวอย่างสำหรับ Standard ID)
+    txData[1] = static_cast<uint8_t>(pMsg->id >> 3);       // SIDH
+    txData[2] = static_cast<uint8_t>(pMsg->id << 5);       // SIDL
+    
+    if (pMsg->isExtended) {
+        txData[2] |= 0x08; // Set EXIDE bit
+        // เพิ่มเติมการจัดการ EID ถ้าใช้งาน Extended ID...
     }
 
-    return isSuccess;
+    // จัดการ DLC
+    txData[5] = pMsg->dlc & 0x0F;
+    if (pMsg->isRtr) txData[5] |= 0x40; // Set RTR bit
+
+    // โหลด Data Payload
+    for (uint8_t i = 0; i < pMsg->dlc; i++) {
+        txData[6 + i] = pMsg->data[i];
+    }
+
+    /* 3. ส่งข้อมูลเข้าบัฟเฟอร์ผ่าน SPI */
+    if (!executeSpiCommand(txData, nullptr, 14)) return false;
+
+    /* 4. สั่ง Request to Send (RTS) เพื่อเริ่มการส่งจริง
+     * Instruction: 1000 0nnn (n คือบิตระบุบัฟเฟอร์)
+     */
+    uint8_t rtsInstruction = 0x80 | (1 << bufferId);
+    return executeSpiCommand(&rtsInstruction, nullptr, 1);
 }
 
 /**

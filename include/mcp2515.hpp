@@ -44,7 +44,7 @@ public:
     bool mcp2515_setMode(const Mcp2515_Regs::Mcp2515_Mode_e targetMode);
     bool mcp2515_setBitrate(const Mcp2515_Regs::Mcp2515_Speed_e speedIndex);
     bool mcp2515_readMessage(const uint8_t bufferId, CanMessage_t* pMsg);
-    bool mcp2515_sendMessage(const CanMessage_t* pMsg, const uint8_t bufferId);
+    bool mcp2515_sendMessage(const uint8_t bufferId, const CanMessage_t* pMsg);
     bool mcp2515_clearInterrupt(const Mcp2515_Regs::Mcp2515_Interrupt_e interrupt);
     
 private:
