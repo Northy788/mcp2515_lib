@@ -67,15 +67,13 @@ bool Mcp2515_Driver_t::mcp2515_writeRegister(const uint8_t address, const uint8_
     /* Verify HAL and SPI function pointer availability */
     if (nullptr != p_hal->spiTransfer)
     {
-        /* 1. Pull CS Low to start SPI transaction */
+        if (p_hal->lockBus) p_hal->lockBus();
+        
         p_hal->setChipSelect(true);
-
-        /* 2. Transfer 3 bytes (Instruction, Address, Data) */
-        /* pRxBuffer is set to nullptr as we don't need to read back during Write */
         isSuccess = p_hal->spiTransfer(txBuffer, nullptr, 3);
-
-        /* 3. Pull CS High to terminate SPI transaction */
         p_hal->setChipSelect(false);
+
+        if (p_hal->unlockBus) p_hal->unlockBus();
     }
 
     return isSuccess; /* Rule 12.6: Single return point */
